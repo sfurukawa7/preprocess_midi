@@ -65,9 +65,34 @@ def piano_roll_to_pretty_midi(piano_roll, highest_note, lowest_note, fs, tempo, 
     mid.instruments.append(instrument)
     return mid 
 
+def _get_overlap_range(range_A_min, range_A_max, range_B_min, range_B_max):
+    if range_A_min > range_B_max or range_A_max < range_B_min:
+        can_be_overlapped = False
+        border_min = None
+        border_max = None
+    elif range_A_min <= range_B_max and range_A_min >= range_B_min:
+        if range_A_max >= range_B_max:
+            can_be_overlapped = True
+            border_min = range_A_min
+            border_max = range_B_max
+        else:
+            can_be_overlapped = True
+            border_min = range_A_min
+            border_max = range_A_max
+    elif range_A_max >= range_B_min and range_A_min <= range_B_min:
+        if range_A_max <= range_B_max:
+            can_be_overlapped = True
+            border_min = range_B_min
+            border_max = range_A_max
+        else:
+            can_be_overlapped = True
+            border_min = range_B_min
+            border_max = range_B_max
+    return can_be_overlapped, border_min, border_max 
+
 #where to cut off high notes. 84 = C6
 #where to cut off low notes. 24=C1
-def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1, extracted_bar_num = 2, highest_note=84, lowest_note=24, notes_count_threshold = 0.5, max_velocity = 127, save_reconstructed_midi=False):
+def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1, extracted_bar_num = 2, highest_note=84, lowest_note=24, tempo_change_threshold = 20, notes_count_threshold = 0.5, max_velocity = 127, save_reconstructed_midi=False):
     # MIDIをロード
     # 失敗した場合はNoneを返す
     try:
@@ -85,18 +110,52 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
     time_signature_list = mid.time_signature_changes
     tempo_change_times, tempo_change_bpm = mid.get_tempo_changes()
 
-    song_start = 0
-    song_end = mid.get_end_time()
+    # テンポの変化が閾値以内であれば、テンポを変えないようにtempoのリストを更新
+    new_tempo_change_times = []
+    new_tempo_change_bpm = []
+    last_time = 0
+    last_bpm = 0
+    firstloop = True
+    for time, bpm in zip(tempo_change_times, tempo_change_bpm):
+        if firstloop:
+            new_tempo_change_times.append(time)
+            new_tempo_change_bpm.append(bpm)
+            firstloop = False
+        else:
+            if np.abs(bpm - last_bpm) > tempo_change_threshold:
+                new_tempo_change_times.append(time)
+                new_tempo_change_bpm.append(bpm)
+        last_time = time
+        last_bpm = bpm
+
+    tempo_start_times = new_tempo_change_times # tempo_change_timesに音楽の終了時刻を追加
+    tempo_end_times = np.append(new_tempo_change_times[1:], mid.get_end_time()) # tempo_change_timesに音楽の終了時刻を追加
 
     # 4/4拍子の区間を抽出
-    time_signature_terms = [] # 区間辞書を格納するリスト
+    four_quarters_terms = [] # 区間辞書を格納するリスト
     for i, ts in enumerate(time_signature_list):
         if ts.numerator == 4 and ts.denominator == 4:
             time_signature_term = {}
             time_signature_term['start_time'] = ts.time
-            time_signature_term['end_time'] = time_signature_list[i+1].time if i != len(time_signature_list)-1 else song_end
+            time_signature_term['end_time'] = time_signature_list[i+1].time if i != len(time_signature_list)-1 else mid.get_end_time()
 
-            time_signature_terms.append(time_signature_term)
+            four_quarters_terms.append(time_signature_term)
+
+    # テンポ一定かつ4/4拍子の小さな音楽（パート）に分ける
+    part_list = [] # 辞書を格納するリスト
+    for tempo, tempo_start_time, tempo_end_time in zip(new_tempo_change_bpm, tempo_start_times, tempo_end_times):
+        for four_quarters_term in four_quarters_terms:
+            four_quarters_start_time = four_quarters_term['start_time']
+            four_quarters_end_time = four_quarters_term['end_time']
+
+            can_be_overlapped, border_min, border_max = _get_overlap_range(tempo_start_time, tempo_end_time, four_quarters_start_time, four_quarters_end_time)
+            if can_be_overlapped:
+                part_dict = {}
+                part_dict['tempo'] = tempo
+                part_dict['start_time'] = border_min
+                part_dict['end_time'] = border_max
+
+                part_list.append(part_dict)
 
     # # 拍子記号の調整
     # if len(time_signature_list) > 1:
@@ -123,27 +182,27 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
     # else:
     #     time_signature = time_signature_list[0]
 
-    # テンポの調整
-    if len(tempo_change_times) > 1:
-        longest_part = 0
-        longest_part_start_time = 0
-        longest_part_end_time = song_end
-        longest_part_tempo = 0
+    # # テンポの調整
+    # if len(tempo_change_times) > 1:
+    #     longest_part = 0
+    #     longest_part_start_time = 0
+    #     longest_part_end_time = song_end
+    #     longest_part_tempo = 0
         
-        _tempo_change_times = np.append(tempo_change_times, song_end) # tempo_change_timesに音楽の終了時刻を追加
-        tempo_interval_list = np.diff(_tempo_change_times, n=1) # 各テンポの演奏時間のリストを生成
-        longest_part_index = tempo_interval_list.argmax() # 最長のテンポのインデックスを取得
+    #     _tempo_change_times = np.append(tempo_change_times, song_end) # tempo_change_timesに音楽の終了時刻を追加
+    #     tempo_interval_list = np.diff(_tempo_change_times, n=1) # 各テンポの演奏時間のリストを生成
+    #     longest_part_index = tempo_interval_list.argmax() # 最長のテンポのインデックスを取得
         
-        longest_part = tempo_interval_list.max() # 最長のテンポの時間を取得
-        longest_part_start_time = _tempo_change_times[longest_part_index]
-        longest_part_end_time = _tempo_change_times[longest_part_index+1]
-        longest_part_tempo = tempo_change_bpm[longest_part_index]
+    #     longest_part = tempo_interval_list.max() # 最長のテンポの時間を取得
+    #     longest_part_start_time = _tempo_change_times[longest_part_index]
+    #     longest_part_end_time = _tempo_change_times[longest_part_index+1]
+    #     longest_part_tempo = tempo_change_bpm[longest_part_index]
 
-        song_start = longest_part_start_time
-        song_end = longest_part_end_time
-        tempo = longest_part_tempo
-    else:
-        tempo = tempo_change_bpm[0]
+    #     song_start = longest_part_start_time
+    #     song_end = longest_part_end_time
+    #     tempo = longest_part_tempo
+    # else:
+    #     tempo = tempo_change_bpm[0]
 
     # piano_mid = pm.PrettyMIDI(initial_tempo=tempo)
     # piano_mid.time_signature_changes = [time_signature]
@@ -173,96 +232,100 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
     X_list = []
     if len(piano_instrument_list) > 0:
         for piano_instrument in piano_instrument_list:
-            # number_of_notes = []
-            # piano_rolls = [i.get_piano_roll(fs=100) for i in piano_instrument_list]
-            # for piano_roll in piano_rolls:
-            #     number_of_notes.append(np.count_nonzero(piano_roll))
-            
-            # np_number_of_notes = np.array(number_of_notes)
-            # chosen_piano_index = np_number_of_notes.argmax()
-            # piano_instrument = piano_instrument_list[chosen_piano_index]
-
-            new_notes = [] # ピアノ音を入れるリスト
-            for note in piano_instrument.notes:
-                # 選択箇所区間に入っているかチェック
-                if note.start >= song_start and note.end <= song_end:
-                    # 時刻を選択箇所内に揃える
-                    note.start -= song_start
-                    note.end -= song_start
-                    new_notes.append(note)
-
-            piano_instrument.notes = new_notes
-
-            quarter_note_length = 60. / tempo
-            # fs：サンプリング周波数
-            # quarter_note_length * 4.：1小節の長さ(s)
-            # smallest_noteは最小音符(e.g. 16分音符ならsmallest_note = 16)
-            fs = 1./(quarter_note_length * 4./ smallest_note)
-            total_ticks = math.ceil(song_end*fs)
-
-            instrument = mid.instruments[0]
-            # np.ndarrayでpiano_rollを作成
-            piano_roll = np.zeros((total_ticks, 128))
-            for note in instrument.notes:
-                note_tick_start = note.start * fs
-                note_tick_end = note.end * fs
-                absolute_start = int(round(note_tick_start))
-                absolute_end = int(round(note_tick_end))
-                decimal = note_tick_start -absolute_start
-
-                # tick付近の音or1s以上の音ならばpiano_rollに追加(このため実際の音楽と少し異なる)
-                if decimal < 10e-3 or absolute_end-absolute_start >= 1:
-                    piano_roll[absolute_start:absolute_end, note.pitch] = note.velocity
-
-            cropped_piano_roll = piano_roll[:, lowest_note:highest_note]
-
-            extracted_bars_ticks = extracted_bar_num * smallest_note
-            total_ticks = cropped_piano_roll.shape[0]
-            if total_ticks % extracted_bars_ticks == 0:
-                total_extracted_bars_num = total_ticks / extracted_bars_ticks        
-                splited_piano_rolls = np.split(cropped_piano_roll, total_extracted_bars_num)
-            else:
-                padding_length = extracted_bars_ticks - (total_ticks % extracted_bars_ticks)
-                padded_piano_roll = np.pad(cropped_piano_roll, ((0, padding_length), (0,0)), 'constant', constant_values = (0,0)) # padding_length分だけパディング
-                padded_total_ticks = padded_piano_roll.shape[0]
-                total_extracted_bars_num = padded_total_ticks / extracted_bars_ticks        
-                splited_piano_rolls = np.split(padded_piano_roll, total_extracted_bars_num)
-
-            # 休符の多い小節を除去
-            new_piano_rolls = []
-            for splited_piano_roll in splited_piano_rolls:
-                notes_or_rests_list = [1 if one_tick_piano_roll.sum() > 0 else 0 for one_tick_piano_roll in splited_piano_roll]
-                notes_percent = sum(notes_or_rests_list) / len(splited_piano_roll)
-                print(notes_percent)
-
-                # 音数の閾値を超えたピアノロールのみappend
-                if notes_percent > notes_count_threshold:
-                    new_piano_rolls.append(splited_piano_roll)
-            print(new_piano_rolls)
-            if save_reconstructed_midi:
-                pathlib_file = Path(file)
-                file_stem = pathlib_file.stem
-                style_name = pathlib_file.parent.name
-
-                # 保存用ディレクトリを作成
-                reconstructed_data_dir = Path('./reconstructed_data') / style_name
-                if not reconstructed_data_dir.is_dir():
-                    reconstructed_data_dir.mkdir(parents=True)
+            for index, part in enumerate(part_list):
+                # number_of_notes = []
+                # piano_rolls = [i.get_piano_roll(fs=100) for i in piano_instrument_list]
+                # for piano_roll in piano_rolls:
+                #     number_of_notes.append(np.count_nonzero(piano_roll))
                 
-                if piano_instrument.name in '.':
-                    track_name = piano_instrument.name.replace('.', '-')
+                # np_number_of_notes = np.array(number_of_notes)
+                # chosen_piano_index = np_number_of_notes.argmax()
+                # piano_instrument = piano_instrument_list[chosen_piano_index]
+
+                tempo = part['tempo']
+                song_start = part['start_time']
+                song_end = part['end_time']
+
+                new_notes = [] # ピアノ音を入れるリスト
+                for note in piano_instrument.notes:
+                    # 選択箇所区間に入っているかチェック
+                    if note.start >= song_start and note.end <= song_end:
+                        # 時刻を選択箇所内に揃える
+                        note.start -= song_start
+                        note.end -= song_start
+                        new_notes.append(note)
+
+                # piano_instrument.notes = new_notes
+
+                quarter_note_length = 60. / tempo
+                # fs：サンプリング周波数
+                # quarter_note_length * 4.：1小節の長さ(s)
+                # smallest_noteは最小音符(e.g. 16分音符ならsmallest_note = 16)
+                fs = 1./(quarter_note_length * 4./ smallest_note)
+                total_ticks = math.ceil(song_end*fs)
+
+                # np.ndarrayでpiano_rollを作成
+                piano_roll = np.zeros((total_ticks, 128))
+                # for note in piano_instrument.notes:
+                for note in new_notes:
+                    note_tick_start = note.start * fs
+                    note_tick_end = note.end * fs
+                    absolute_start = int(round(note_tick_start))
+                    absolute_end = int(round(note_tick_end))
+                    decimal = note_tick_start -absolute_start
+
+                    # tick付近の音or1s以上の音ならばpiano_rollに追加(このため実際の音楽と少し異なる)
+                    if decimal < 10e-3 or absolute_end-absolute_start >= 1:
+                        piano_roll[absolute_start:absolute_end, note.pitch] = note.velocity
+
+                cropped_piano_roll = piano_roll[:, lowest_note:highest_note]
+
+                extracted_bars_ticks = extracted_bar_num * smallest_note
+                total_ticks = cropped_piano_roll.shape[0]
+                if total_ticks % extracted_bars_ticks == 0:
+                    total_extracted_bars_num = total_ticks / extracted_bars_ticks        
+                    splited_piano_rolls = np.split(cropped_piano_roll, total_extracted_bars_num)
                 else:
-                    track_name = piano_instrument.name
+                    padding_length = extracted_bars_ticks - (total_ticks % extracted_bars_ticks)
+                    padded_piano_roll = np.pad(cropped_piano_roll, ((0, padding_length), (0,0)), 'constant', constant_values = (0,0)) # padding_length分だけパディング
+                    padded_total_ticks = padded_piano_roll.shape[0]
+                    total_extracted_bars_num = padded_total_ticks / extracted_bars_ticks        
+                    splited_piano_rolls = np.split(padded_piano_roll, total_extracted_bars_num)
 
-                for i, new_piano_roll in enumerate(new_piano_rolls):
-                    reconstructed_mid = piano_roll_to_pretty_midi(new_piano_roll.T, highest_note, lowest_note, fs, tempo, has_cropped=True)
-                    reconstructed_file = reconstructed_data_dir / (file_stem + '_{}_{}.mid'.format(track_name, i))
-                    reconstructed_mid.write(str(reconstructed_file))
+                # 休符の多い小節を除去
+                new_piano_rolls = []
+                for splited_piano_roll in splited_piano_rolls:
+                    notes_or_rests_list = [1 if one_tick_piano_roll.sum() > 0 else 0 for one_tick_piano_roll in splited_piano_roll]
+                    notes_percent = sum(notes_or_rests_list) / len(splited_piano_roll)
 
-            np_new_piano_rolls = np.array(new_piano_rolls)
+                    # 音数の閾値を超えたピアノロールのみappend
+                    if notes_percent > notes_count_threshold:
+                        new_piano_rolls.append(splited_piano_roll)
 
-            X = np.where(np_new_piano_rolls > 0, 1, 0) # 学習用ピアノロール
-            X_list.append(X)
+                if save_reconstructed_midi:
+                    pathlib_file = Path(file)
+                    file_stem = pathlib_file.stem
+                    style_name = pathlib_file.parent.name
+
+                    # 保存用ディレクトリを作成
+                    reconstructed_data_dir = Path('./reconstructed_data') / style_name
+                    if not reconstructed_data_dir.is_dir():
+                        reconstructed_data_dir.mkdir(parents=True)
+                    
+                    if piano_instrument.name in '.':
+                        track_name = piano_instrument.name.replace('.', '-')
+                    else:
+                        track_name = piano_instrument.name
+
+                    for i, new_piano_roll in enumerate(new_piano_rolls):
+                        reconstructed_mid = piano_roll_to_pretty_midi(new_piano_roll.T, highest_note, lowest_note, fs, tempo, has_cropped=True)
+                        reconstructed_file = reconstructed_data_dir / (file_stem + '_{}_part{}_{}.mid'.format(track_name, index, i))
+                        reconstructed_mid.write(str(reconstructed_file))
+
+                np_new_piano_rolls = np.array(new_piano_rolls)
+
+                X = np.where(np_new_piano_rolls > 0, 1, 0) # 学習用ピアノロール
+                X_list.append(X)
 
         return X_list
 
