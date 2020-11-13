@@ -4,11 +4,13 @@ import numpy as np
 import math
 import glob
 from pathlib import Path
+import re
+import sys
 from tqdm import tqdm
 
 from sklearn.model_selection import train_test_split
 
-print_anything = True 
+print_anything = False
 
 
         
@@ -100,7 +102,7 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
     except (ValueError, EOFError, IndexError, OSError, KeyError, ZeroDivisionError, AttributeError) as e:
         exception_str = 'Unexpected error in ' + file + ':\n', e, sys.exc_info()[0]
         if print_anything:print(exception_str)
-        return None, None, None, None, None, None
+        return None
 
     if print_anything:print("Time signature changes: ", mid.time_signature_changes)
     # 曲の始まりと終わりを決定
@@ -284,7 +286,12 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
                 total_ticks = cropped_piano_roll.shape[0]
                 if total_ticks % extracted_bars_ticks == 0:
                     total_extracted_bars_num = total_ticks / extracted_bars_ticks        
-                    splited_piano_rolls = np.split(cropped_piano_roll, total_extracted_bars_num)
+                    try:
+                        splited_piano_rolls = np.split(cropped_piano_roll, total_extracted_bars_num)
+                    except ZeroDivisionError as e:
+                        exception_str = 'Unexpected error in ' + file + ':\n', e, sys.exc_info()[0]
+                        if print_anything:print(exception_str)
+                        return None
                 else:
                     padding_length = extracted_bars_ticks - (total_ticks % extracted_bars_ticks)
                     padded_piano_roll = np.pad(cropped_piano_roll, ((0, padding_length), (0,0)), 'constant', constant_values = (0,0)) # padding_length分だけパディング
@@ -312,8 +319,10 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
                     if not reconstructed_data_dir.is_dir():
                         reconstructed_data_dir.mkdir(parents=True)
                     
-                    if piano_instrument.name in '.':
-                        track_name = piano_instrument.name.replace('.', '-')
+                    # ファイル名に使用できない文字を空白に変換
+                    
+                    if re.search(r'.*[\\/:*?"<>\|\]+].*', piano_instrument.name):
+                        track_name = re.sub(r'[\\/:*?"<>|]+', ' ', piano_instrument.name)
                     else:
                         track_name = piano_instrument.name
 
@@ -444,24 +453,10 @@ def import_midi_from_folder(folder, load_from_npy_instead_of_midi, save_imported
 
     return X_train, X_test, c_train, c_test, train_paths, test_paths
 
-def check_time_signature(path):
-    # MIDIをロード
-    # 失敗した場合はNoneを返す
-    try:
-        mid = pm.PrettyMIDI(path)
-    except (ValueError, EOFError, IndexError, OSError, KeyError, ZeroDivisionError, AttributeError) as e:
-        exception_str = 'Unexpected error in ' + path + ':\n', e, sys.exc_info()[0]
-        if print_anything:print(exception_str)
-        return None, None, None, None, None, None
-
-    tempo_change_times, tempo_change_bpm = mid.get_tempo_changes()
-    print(tempo_change_bpm)
-    # if print_anything:print("Time signature changes: ", mid.time_signature_changes)
-
 if __name__ == '__main__':
-    folder = '../data'
+    folder = '../Music_Style_Content'
     # folder = './npy'
-    import_midi_from_folder(folder, False, True, True, 1/3)
+    import_midi_from_folder(folder, False, True, True, 0.1)
     # path = '../data/sample/jazz_Chipblue.mid'
     # load_rolls(path, smallest_note = 48, maximal_number_of_voices_per_track = 1) 
 
