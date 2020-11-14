@@ -320,9 +320,8 @@ def load_rolls(file, smallest_note = 48, maximal_number_of_voices_per_track = 1,
                         reconstructed_data_dir.mkdir(parents=True)
                     
                     # ファイル名に使用できない文字を空白に変換
-                    
-                    if re.search(r'.*[\\/:*?"<>\|\]+].*', piano_instrument.name):
-                        track_name = re.sub(r'[\\/:*?"<>|]+', ' ', piano_instrument.name)
+                    if  re.search(r'.*[\[\|\/:\*\?"<>\]\+]*.*', piano_instrument.name):
+                        track_name = re.sub(r'[\[\|\/:\*\?"<>\]\+]*', '', piano_instrument.name)
                     else:
                         track_name = piano_instrument.name
 
